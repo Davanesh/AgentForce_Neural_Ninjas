@@ -1,0 +1,16 @@
+name: AI PR Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send PR Data to AI Reviewer
+        run: |
+          curl -X POST \
+          -H "Content-Type: application/json" \
+          -d '${{ toJson(github.event) }}' \
+          https://your-server-url/webhook
