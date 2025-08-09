@@ -1,75 +1,88 @@
-// backend/index.js
 import express from "express";
+import bodyParser from "body-parser";
+import crypto from "crypto";
 import axios from "axios";
 import dotenv from "dotenv";
-import bodyParser from "body-parser";
+import { getAIReview, postPRComment } from "./reviewAgent.js";
 
 dotenv.config();
+
 const app = express();
-app.use(bodyParser.json());
 
-app.get("/", (req, res) => {
-  res.send("🚀 AI PR Reviewer Backend is running!");
-});
+const GITHUB_SECRET = process.env.GITHUB_SECRET;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
+// Signature verification
+function verifySignature(req, buf) {
+  const signature = req.headers["x-hub-signature-256"];
+  if (!signature) return false;
 
-app.post("/webhook", async (req, res) => {
+  const hmac = crypto.createHmac("sha256", GITHUB_SECRET);
+  hmac.update(buf);
+  const expected = `sha256=${hmac.digest("hex")}`;
+
   try {
-    const prData = req.body.pull_request;
-    if (!prData) return res.status(200).send("No PR data");
-
-    const diffUrl = prData.diff_url;
-    const prNumber = prData.number;
-    const repoName = req.body.repository.full_name;
-
-    // Get PR diff
-    const diffRes = await axios.get(diffUrl);
-    const diffContent = diffRes.data;
-
-    // Send to AI
-    const review = await getAIReview(diffContent, prData.title, prData.body);
-
-    // Post comment to PR
-    await axios.post(
-      `https://api.github.com/repos/${repoName}/issues/${prNumber}/comments`,
-      { body: review },
-      { headers: { Authorization: `token ${process.env.GITHUB_TOKEN}` } }
+    return crypto.timingSafeEqual(
+      Buffer.from(signature),
+      Buffer.from(expected)
     );
-
-    res.status(200).send("Review posted!");
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Error processing webhook");
+  } catch {
+    return false;
   }
-});
-
-async function getAIReview(diff, title, description) {
-  const prompt = `
-You are a senior software engineer reviewing a PR.
-PR Title: ${title}
-PR Description: ${description}
-
-Diff:
-${diff}
-
-Give feedback in this format:
-1. Summary
-2. Strengths
-3. Issues Found
-4. Suggestions with code snippets
-5. Code Quality Score (out of 100)
-  `;
-
-  const openaiRes = await axios.post(
-    "https://api.openai.com/v1/chat/completions",
-    {
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-    },
-    { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
-  );
-
-  return openaiRes.data.choices[0].message.content;
 }
 
-app.listen(3000, () => console.log("🚀 Server running on port 3000"));
+// Middleware to verify GitHub webhook requests
+app.use(
+  bodyParser.json({
+    verify: (req, res, buf) => {
+      if (!verifySignature(req, buf)) {
+        console.warn("⚠️ Invalid GitHub webhook signature");
+        throw new Error("Invalid signature");
+      }
+    },
+  })
+);
+
+// Webhook endpoint
+app.post("/webhook", async (req, res) => {
+  const event = req.headers["x-github-event"];
+
+  if (event === "pull_request" && req.body.action === "opened") {
+    try {
+      const { pull_request, repository } = req.body;
+
+      const owner = repository.owner.login;
+      const repo = repository.name;
+      const pullNumber = pull_request.number;
+
+      // Fetch diff
+      const diffRes = await axios.get(pull_request.diff_url, {
+        headers: { Authorization: `Bearer ${GITHUB_TOKEN}` },
+      });
+      const diff = diffRes.data;
+
+      // Get AI review
+      const aiReview = await getAIReview(
+        diff,
+        pull_request.title,
+        pull_request.body
+      );
+
+      // Post comment to PR
+      await postPRComment(owner, repo, pullNumber, aiReview);
+
+      console.log(`✅ Posted AI review on PR #${pullNumber}`);
+      res.status(200).send("Review posted!");
+    } catch (err) {
+      console.error("❌ Error handling PR:", err.message);
+      res.status(500).send("Internal Server Error");
+    }
+  } else {
+    res.status(200).send("Event ignored");
+  } 
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () =>
+  console.log(`🚀 Server running on http://localhost:${PORT}`)
+);
