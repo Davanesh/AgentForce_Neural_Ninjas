@@ -72,7 +72,10 @@ app.post("/webhook", async (req, res) => {
       await postPRComment(owner, repo, pullNumber, aiReview);
 
       console.log(`✅ Posted AI review on PR #${pullNumber}`);
-      res.status(200).send("Review posted!");
+      res.status(200).json({
+      message: "Review posted!",
+      review: aiReview
+    });
     } catch (err) {
       console.error("❌ Error handling PR:", err.message);
       res.status(500).send("Internal Server Error");
